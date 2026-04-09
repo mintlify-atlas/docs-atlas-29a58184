@@ -1,0 +1,158 @@
+---
+title: "Debugging"
+description: "Debug Gemma Gem using Chrome extension developer tools"
+---
+
+## Log behavior
+
+All logs produced by Gemma Gem are prefixed with `[Gemma Gem]`.
+
+The logger module (`shared/logger.ts`) uses `import.meta.env.DEV` to determine the build mode:
+
+```typescript
+const IS_DEV = import.meta.env.DEV
+
+const PREFIX = '[Gemma Gem]'
+
+export const log = {
+  info(...args: unknown[]) {
+    if (IS_DEV) console.log(PREFIX, ...args)
+  },
+  warn(...args: unknown[]) {
+    if (IS_DEV) console.warn(PREFIX, ...args)
+  },
+  error(...args: unknown[]) {
+    // Always log errors
+    console.error(PREFIX, ...args)
+  },
+  debug(...args: unknown[]) {
+    if (IS_DEV) console.debug(PREFIX, ...args)
+  },
+}
+```
+
+| Build mode | `log.info` | `log.debug` | `log.warn` | `log.error` |
+|---|---|---|---|---|
+| Development (`pnpm build`) | Active | Active | Active | Active |
+| Production (`pnpm build:prod`) | Silent | Silent | Silent | Active |
+
+## Inspecting extension contexts
+
+The extension runs across three separate contexts, each with its own DevTools console.
+
+### Service worker
+
+The service worker handles message routing between the content script and the offscreen document. It also executes `take_screenshot` and `run_javascript` tool calls.
+
+<Steps>
+  <Step title="Open the extensions page">
+    Navigate to `chrome://extensions` in Chrome.
+  </Step>
+  <Step title="Find Gemma Gem">
+    Locate the Gemma Gem card in the list.
+  </Step>
+  <Step title="Inspect the service worker">
+    Click **"Inspect views: service worker"** to open a dedicated DevTools window for the service worker.
+  </Step>
+</Steps>
+
+### Offscreen document
+
+The offscreen document is where the Gemma 4 model runs via WebGPU. This is the most useful context for debugging — it shows model loading progress, prompt construction, token counts, raw model output, and tool execution results.
+
+<Steps>
+  <Step title="Open the extensions page">
+    Navigate to `chrome://extensions` in Chrome.
+  </Step>
+  <Step title="Find Gemma Gem">
+    Locate the Gemma Gem card in the list.
+  </Step>
+  <Step title="Inspect the offscreen document">
+    Click **"Inspect views: offscreen.html"** to open a DevTools window for the offscreen document.
+  </Step>
+</Steps>
+
+<Tip>
+  The offscreen document logs are the most informative. Watch this console when debugging model loading failures, unexpected outputs, or tool execution issues.
+</Tip>
+
+### Content script
+
+The content script runs in the context of every page the extension is active on. It manages the gem icon overlay, the shadow DOM chat panel, and DOM tools (`read_page_content`, `click_element`, `type_text`, `scroll_page`).
+
+<Steps>
+  <Step title="Navigate to a page with the extension active">
+    Open any webpage where Gemma Gem is enabled.
+  </Step>
+  <Step title="Open Chrome DevTools">
+    Press `F12` or right-click and select **Inspect**.
+  </Step>
+  <Step title="Open the Console tab">
+    Filter by `[Gemma Gem]` to isolate extension logs from page noise.
+  </Step>
+</Steps>
+
+### All extension contexts at once
+
+<Steps>
+  <Step title="Navigate to the inspection page">
+    Open `chrome://inspect#other` in Chrome.
+  </Step>
+  <Step title="Find extension contexts">
+    All inspectable extension pages are listed here — including the service worker, offscreen document, and any active content scripts.
+  </Step>
+  <Step title="Click Inspect">
+    Click **inspect** next to the context you want to open a DevTools window for it.
+  </Step>
+</Steps>
+
+## Common issues
+
+<AccordionGroup>
+  <Accordion title="Model is not loading">
+    **Symptoms**: The gem icon shows a stuck progress ring, or the chat shows no loading progress.
+
+    **Steps to diagnose**:
+    1. Open the offscreen document DevTools (`chrome://extensions` → Inspect views: offscreen.html)
+    2. Look for `[Gemma Gem]` log entries related to model download or initialization
+    3. Check for network errors — the model is fetched from Hugging Face on first run (~500MB for E2B, ~1.5GB for E4B)
+    4. Confirm Chrome has WebGPU support by visiting `chrome://gpu` and checking for WebGPU in the feature status list
+
+    **Common causes**:
+    - No internet connection on first run (model not yet cached)
+    - WebGPU not available or disabled in Chrome flags
+    - Insufficient disk space for the model cache
+  </Accordion>
+
+  <Accordion title="Tool calls are failing">
+    **Symptoms**: The agent reports it cannot complete an action (click, type, scroll, etc.), or tool results contain errors.
+
+    **Steps to diagnose**:
+    1. Open the offscreen document DevTools to see the raw tool call request and result
+    2. Open the content script DevTools (page DevTools → Console) to see DOM tool execution logs
+    3. For `take_screenshot` or `run_javascript` failures, check the service worker DevTools
+
+    **Common causes**:
+    - CSS selector no longer matches an element on the page (use `read_page_content` first to inspect the DOM)
+    - `run_javascript` throwing an uncaught exception — the error text is returned as the tool result
+    - Page navigation occurred mid-agent-loop, causing the content script to unload
+  </Accordion>
+
+  <Accordion title="Context window exhaustion">
+    **Symptoms**: The model stops responding, returns incomplete output, or the extension logs mention context budget or truncation.
+
+    **Steps to diagnose**:
+    1. Open the offscreen document DevTools and look for token count logs
+    2. Check for log entries about truncated tool call recovery or context budget detection
+
+    **Common causes**:
+    - Very long conversations accumulating many tool results
+    - `read_page_content` returning large HTML payloads
+    - Many agentic iterations with verbose tool outputs
+
+    **Resolution**:
+    - Use the **Clear context** button in the settings panel (gear icon in the chat header) to reset conversation history for the current page
+    - Switch to a model with a larger context window (E4B) if available
+    - Reduce **Max iterations** in settings to cap tool call loops per request
+  </Accordion>
+</AccordionGroup>

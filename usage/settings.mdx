@@ -1,0 +1,85 @@
+---
+title: "Settings"
+description: "Configure Gemma Gem's model, thinking mode, and per-site behavior."
+---
+
+Open settings by clicking the **gear icon** (⚙) in the top-right corner of the chat header. The settings panel expands inline below the header without leaving the page.
+
+## Settings reference
+
+### Model
+
+Switch between the two available Gemma 4 variants. The selection is persisted via `chrome.storage.local` and applies to all sites.
+
+| Model | HuggingFace ID | Download size | Context window |
+|-------|---------------|---------------|----------------|
+| Gemma 4 E2B | `onnx-community/gemma-4-E2B-it-ONNX` | ~500 MB | 128,000 tokens |
+| Gemma 4 E4B | `onnx-community/gemma-4-E4B-it-ONNX` | ~1.5 GB | 128,000 tokens |
+
+<Note>
+The model selector is disabled while a model is loading or while a generation is in progress. Wait for the status to show **Ready** before switching.
+</Note>
+
+Switching models triggers a reload of the offscreen document. A loading progress ring appears on the gem icon while the new model initializes.
+
+### Thinking
+
+A toggle that enables or disables Gemma 4's native reasoning mode. When on, the model produces an internal chain-of-thought before writing its final answer. The thinking output is visible as a collapsible **Thinking...** block in the chat.
+
+Default: **on**
+
+### Max tool iterations
+
+A numeric input that caps how many tool calls the agent loop can make in a single request. This prevents unbounded loops when the model keeps invoking tools without reaching a final answer.
+
+Default: **10** · Minimum: **1** · Maximum: **50**
+
+### Clear context
+
+A button in the status bar (below the settings panel) that resets the conversation history for the current page. All previous messages are removed from both the UI and the agent's memory. A confirmation message is added to the chat to mark the reset.
+
+<Note>
+Clear context only affects the current tab. History in other tabs is unaffected.
+</Note>
+
+### Disable on this site
+
+A button at the bottom of the settings panel that disables Gemma Gem for the current hostname. When disabled:
+
+- The gem icon changes to a greyed-out gem with a red strike-through.
+- The chat cannot be opened.
+- The setting is persisted in `chrome.storage.local` under the hostname key.
+
+To re-enable, click the greyed-out gem icon. A confirmation dialog appears — click **OK** to re-enable the extension for the site.
+
+---
+
+## FAQ
+
+<AccordionGroup>
+  <Accordion title="Which model should I use?">
+    Start with **Gemma 4 E2B** (~500 MB). It loads faster and uses less memory. Switch to **E4B** (~1.5 GB) if you need stronger reasoning or more nuanced answers — it is a larger model with more capacity but requires more RAM and a longer initial download.
+
+    Both models share the same 128,000-token context window, so context length is not a differentiator.
+  </Accordion>
+
+  <Accordion title="Does switching models clear my conversation?">
+    Yes. When you switch models, the current agent loop's history is cleared (`AgentLoop.clearHistory()`), the existing model is disposed and unloaded from GPU memory, and the new model is loaded in its place. The offscreen document itself stays running — only the model weights and conversation history change.
+  </Accordion>
+
+  <Accordion title="What happens when max iterations is reached?">
+    The agent loop stops calling tools and returns whatever answer it has constructed so far. This is a safety cap to avoid infinite loops — if a task genuinely requires more steps, increase the limit before sending the request.
+  </Accordion>
+
+  <Accordion title="Is thinking mode slower?">
+    Yes, slightly. When thinking is enabled the model generates additional reasoning tokens before producing the visible answer. The benefit is more accurate, step-by-step reasoning for complex tasks. For simple factual questions you can turn it off to get faster responses.
+  </Accordion>
+
+  <Accordion title="Where is the disabled-site list stored?">
+    Disabled hostnames are stored in `chrome.storage.local`, so they persist across browser restarts. They are scoped to the extension and are not synced via `chrome.storage.sync`.
+  </Accordion>
+
+  <Accordion title="Can I change settings mid-conversation?">
+    Yes. Thinking and max iterations take effect on the next message you send. Model changes take effect immediately (after the new model finishes loading) and clear the current conversation.
+  </Accordion>
+</AccordionGroup>

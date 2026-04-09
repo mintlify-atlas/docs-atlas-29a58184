@@ -1,0 +1,151 @@
+---
+title: "Architecture overview"
+description: "How Gemma Gem's three-layer extension architecture works together"
+---
+
+Gemma Gem is built on three cooperating Chrome extension contexts. Each context has a distinct role, and they communicate exclusively through Chrome's message-passing APIs — no shared memory, no direct function calls across boundaries.
+
+## System diagram
+
+```
+Offscreen Document          Service Worker           Content Script
+(Gemma 4 + Agent Loop)  <-> (Message Router)    <-> (Chat UI + DOM Tools)
+       |                         |
+  WebGPU inference          Screenshot capture
+  Token streaming           JS execution
+```
+
+## The three components
+
+<CardGroup cols={3}>
+  <Card title="Offscreen Document" icon="microchip">
+    Hosts the Gemma 4 model via `@huggingface/transformers` and WebGPU. Runs the agent loop, streams tokens, and dispatches tool calls back to the service worker. Has no visible UI.
+  </Card>
+  <Card title="Service Worker" icon="arrows-left-right">
+    The central message router. Bridges content scripts and the offscreen document. Handles privileged operations — `take_screenshot` (via `chrome.tabs.captureVisibleTab`) and `run_javascript` (via `chrome.scripting.executeScript`).
+  </Card>
+  <Card title="Content Script" icon="browser">
+    Injected into every page. Renders the gem icon and the shadow DOM chat overlay. Executes DOM tools (`read_page_content`, `click_element`, `type_text`, `scroll_page`) directly in the page context.
+  </Card>
+</CardGroup>
+
+## Data flow
+
+The path of a single user message through the system:
+
+<Steps>
+  <Step title="User sends a message">
+    The user types in the chat overlay (content script). The content script captures a page snapshot and sends a `chat:send` message to the service worker.
+  </Step>
+  <Step title="Service worker routes to offscreen">
+    The service worker calls `ensureOffscreenDocument()` to guarantee the offscreen page exists, then forwards an `agent:run` message (including `tabId`, `userMessage`, settings, and `pageContext`) to the offscreen document.
+  </Step>
+  <Step title="Agent loop runs in offscreen">
+    The offscreen document's `AgentLoop` builds a prompt, calls `model.generate()`, and streams tokens back via `agent:chunk` messages routed through the service worker to the originating tab's content script.
+  </Step>
+  <Step title="Tool calls are dispatched">
+    When the model emits a tool call, the offscreen document sends a `tool:execute` message to the service worker. The service worker either handles it directly (screenshot, JS) or forwards it to the content script (`agent:tool_call`).
+  </Step>
+  <Step title="Tool results return to the model">
+    The content script (or service worker) sends a `tool:result` message. The offscreen document receives it, appends it to the prompt, and continues the agent loop.
+  </Step>
+  <Step title="Final response delivered">
+    When the model produces a response without tool calls, the offscreen document sends `agent:response`. The service worker relays it to the content script, which renders it in the chat overlay.
+  </Step>
+</Steps>
+
+## WebGPU inference in the offscreen document
+
+The offscreen document exists specifically to run WebGPU workloads that would be unavailable in a service worker. `GemmaModelHost` (in `offscreen/model-host.ts`) implements the `ModelBackend` interface:
+
+```typescript
+export class GemmaModelHost implements ModelBackend {
+  async load(modelId: ModelId = DEFAULT_MODEL_ID): Promise<void> {
+    const [model, processor] = await Promise.all([
+      Gemma4ForConditionalGeneration.from_pretrained(config.hfModelId, {
+        dtype: 'q4f16',
+        device: 'webgpu',
+        progress_callback,
+      }),
+      AutoProcessor.from_pretrained(config.hfModelId),
+    ])
+    // ...
+  }
+
+  async generate(prompt: string, options?: GenerateOptions): Promise<string> {
+    // Streams tokens via TextStreamer, routing thinking chunks and
+    // regular text chunks to separate callbacks
+  }
+
+  contextLimit = 128_000
+
+  countTokens(text: string): number {
+    const { input_ids } = this.processor.tokenizer(text, { add_special_tokens: false })
+    return input_ids.size
+  }
+}
+```
+
+ONNX Runtime WebAssembly backend files are served locally from the extension package — `env.backends.onnx.wasm.wasmPaths` is set to `chrome.runtime.getURL('ort/')` so no CDN requests are made.
+
+## Message passing
+
+All cross-context communication uses `chrome.runtime.sendMessage` and `chrome.tabs.sendMessage`. Every message is typed via the `Message` union in `shared/messages.ts`.
+
+### Message types taxonomy
+
+Messages are grouped by direction:
+
+```typescript
+// Content Script → Service Worker
+type ChatSendMessage      = { type: 'chat:send';     text: string; settings?: ChatSettings; pageContext?: string }
+type ChatOpenMessage      = { type: 'chat:open' }
+type ChatStopMessage      = { type: 'chat:stop' }
+type SettingsUpdateMessage= { type: 'settings:update'; settings: ChatSettings }
+type ContextClearMessage  = { type: 'context:clear' }
+type ToolResultMessage    = { type: 'tool:result';   requestId: string; result: unknown }
+type ModelSwitchMessage   = { type: 'model:switch';  modelId: ModelId }
+
+// Service Worker → Content Script
+type AgentResponseMessage = { type: 'agent:response'; text: string }
+type AgentChunkMessage    = { type: 'agent:chunk';    text: string }
+type AgentThinkingMessage = { type: 'agent:thinking'; text: string }
+type AgentToolCallMessage = { type: 'agent:tool_call'; requestId: string; call: ToolCall }
+type ModelStatusMessage   = { type: 'model:status';  status: 'loading' | 'ready' | 'error'; progress?: number }
+
+// Service Worker → Offscreen Document
+type AgentRunMessage      = { type: 'agent:run';     tabId: number; userMessage: string; settings?: ChatSettings; pageContext?: string }
+type ModelLoadMessage     = { type: 'model:load';    modelId?: ModelId }
+
+// Offscreen Document → Service Worker
+type OffscreenToolExecuteMessage   = { type: 'tool:execute';   tabId: number; requestId: string; call: ToolCall }
+type OffscreenAgentResponseMessage = { type: 'agent:response'; tabId: number; text: string }
+type OffscreenAgentChunkMessage    = { type: 'agent:chunk';    tabId: number; text: string }
+type OffscreenModelStatusMessage   = { type: 'model:status';   status: 'loading' | 'ready' | 'error'; progress?: number }
+```
+
+The `tabId` field on offscreen-originated messages lets the service worker route responses back to the correct tab — the offscreen document has no tab context of its own.
+
+## Models
+
+Both models use ONNX format with q4f16 quantization and a 128K token context window.
+
+| Model ID | HuggingFace ID | Download size | Context |
+|---|---|---|---|
+| `gemma-4-e2b` | `onnx-community/gemma-4-E2B-it-ONNX` | ~500 MB | 128K tokens |
+| `gemma-4-e4b` | `onnx-community/gemma-4-E4B-it-ONNX` | ~1.5 GB | 128K tokens |
+
+`gemma-4-e2b` is the default. The user's selection is persisted in `chrome.storage.local` under the key `gemma_selected_model`.
+
+## Tech stack
+
+| Package | Role |
+|---|---|
+| [WXT](https://wxt.dev) | Chrome extension framework (Vite-based) |
+| [@huggingface/transformers](https://github.com/huggingface/transformers.js) | Browser ML inference via ONNX Runtime WebGPU |
+| [marked](https://github.com/markedjs/marked) | Markdown rendering in the chat overlay |
+| onnxruntime-web | WASM/WebGPU ONNX execution backend |
+
+<Note>
+All extension logs are prefixed with `[Gemma Gem]`. In development builds, `info`, `debug`, and `warn` levels are active. Production builds emit errors only.
+</Note>

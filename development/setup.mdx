@@ -1,0 +1,110 @@
+---
+title: "Development setup"
+description: "Set up a local development environment for contributing to Gemma Gem"
+---
+
+## Prerequisites
+
+Before you begin, make sure you have the following installed:
+
+- **Node.js** — v18 or later recommended
+- **pnpm** — the only supported package manager for this project
+
+<Warning>
+  Always use `pnpm`. Never use `npm` or `yarn` with this project.
+</Warning>
+
+Install pnpm if you don't have it:
+
+```bash
+npm install -g pnpm
+```
+
+You will also need **Chrome** with WebGPU support to run and test the extension.
+
+## Setup
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/kessler/gemma-gem.git
+    cd gemma-gem
+    ```
+  </Step>
+
+  <Step title="Install dependencies">
+    ```bash
+    pnpm install
+    ```
+
+    This installs all dependencies and automatically runs `wxt prepare` via the `postinstall` script, which generates WXT type declarations and prepares the project for development.
+  </Step>
+
+  <Step title="Start the development server">
+    ```bash
+    pnpm dev
+    ```
+
+    This starts the WXT dev server with live reload. The extension is built in development mode and output to `.output/chrome-mv3-dev/`.
+  </Step>
+
+  <Step title="Load the extension in Chrome">
+    1. Open `chrome://extensions` in Chrome
+    2. Enable **Developer mode** (toggle in the top-right corner)
+    3. Click **Load unpacked**
+    4. Select the `.output/chrome-mv3-dev/` directory
+
+    The extension will appear in your extensions list as **Gemma Gem [dev]**.
+  </Step>
+
+  <Step title="Verify the setup">
+    Navigate to any webpage and look for the gem icon in the bottom-right corner. Click it to open the chat overlay. The first run will download the model (~500MB for E2B).
+  </Step>
+</Steps>
+
+## Build modes
+
+There are two build modes available:
+
+| Command | Mode | Description |
+|---|---|---|
+| `pnpm build` | development | Logging active, source maps enabled, not minified |
+| `pnpm build:prod` | production | Logging silenced (errors only), minified |
+
+The `pnpm dev` command uses the development mode internally. Use `pnpm build:prod` when building for distribution.
+
+## TypeScript type checking
+
+To run the TypeScript compiler check without emitting files:
+
+```bash
+pnpm compile
+```
+
+This runs `tsc --noEmit` using the project's `tsconfig.json`, which extends the WXT-generated config at `.wxt/tsconfig.json`.
+
+## Project structure
+
+```
+gemma-gem/
+├── agent/          # Portable agent loop (zero Chrome dependencies)
+│   └── ...         # Defines ModelBackend and ToolExecutor interfaces
+├── background/     # Service worker — message routing, screenshots, JS execution
+├── content/        # Content script — gem icon, shadow DOM chat overlay, DOM tools
+├── entrypoints/    # WXT entry points: background.ts, content.ts, offscreen/
+├── offscreen/      # Offscreen document — Gemma 4 model + WebGPU inference
+├── shared/         # Shared utilities (logger, types, constants)
+├── public/
+│   └── ort/        # ONNX runtime WASM files (copied during build)
+├── wxt.config.ts   # WXT + Vite configuration
+├── package.json
+└── tsconfig.json
+```
+
+<Note>
+  The `public/ort/` directory is populated automatically during the build. The `wxt.config.ts` copies the required ONNX runtime files (`ort-wasm-simd-threaded.asyncify.mjs` and `ort-wasm-simd-threaded.asyncify.wasm`) from `onnxruntime-web` into `public/ort/` before each build.
+</Note>
+
+<Tip>
+  The `agent/` directory has zero dependencies on Chrome or browser APIs. It can be extracted and used as a standalone library independently of the extension.
+</Tip>

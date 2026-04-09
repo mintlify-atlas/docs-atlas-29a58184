@@ -1,0 +1,252 @@
+---
+title: "Extension components"
+description: "The three Chrome extension entry points and how they communicate"
+---
+
+Gemma Gem is a Manifest V3 extension with three separate execution contexts. Each context runs in isolation — they share no memory and communicate only through Chrome's message-passing APIs using the `Message` union type from `shared/messages.ts`.
+
+## Required permissions
+
+```json
+{
+  "permissions": ["activeTab", "scripting", "offscreen", "storage"]
+}
+```
+
+| Permission | Used by |
+|---|---|
+| `activeTab` | Service worker — needed for `captureVisibleTab` (screenshot) |
+| `scripting` | Service worker — needed for `executeScript` (run_javascript) |
+| `offscreen` | Service worker — needed to create the offscreen document |
+| `storage` | Content script + service worker — persists model selection and disabled-sites list |
+
+---
+
+## Content script
+
+**Entry point:** `entrypoints/content.ts`  
+**Matches:** `<all_urls>`
+
+The content script is the user-facing layer. It injects two elements into every page: a gem icon (bottom-right corner) and a shadow DOM chat overlay.
+
+### Shadow DOM chat overlay
+
+The chat UI is mounted inside a shadow root to prevent the host page's CSS from affecting it. The `ChatOverlay` class manages the overlay's lifecycle — toggling visibility, rendering messages, streaming tokens, and showing tool call indicators.
+
+```typescript
+const chat = new ChatOverlay({
+  onSend(text) {
+    const pageContext = capturePageSnapshot()
+    safeSend({ type: 'chat:send', text, settings: chat.settings, pageContext })
+  },
+  onStop() {
+    safeSend({ type: 'chat:stop' })
+  },
+  onSettingsChange(settings) {
+    safeSend({ type: 'settings:update', settings })
+  },
+  onClearContext() {
+    safeSend({ type: 'context:clear' })
+  },
+  onModelSwitch(modelId) {
+    safeSend({ type: 'model:switch', modelId })
+  },
+})
+```
+
+### Page context snapshot
+
+Before sending a user message, the content script captures a lightweight page snapshot (URL, title, and up to 8,000 characters of `document.body.innerText`) and attaches it as `pageContext` on the `chat:send` message. The agent loop receives this as part of the system context.
+
+```typescript
+function capturePageSnapshot(): string {
+  const title = document.title
+  const url = location.href
+  const body = document.body?.innerText ?? ''
+  const truncated = body.length > PAGE_SNAPSHOT_MAX_LENGTH
+    ? body.slice(0, PAGE_SNAPSHOT_MAX_LENGTH) + '\n...(truncated)'
+    : body
+  return `url: ${url}\ntitle: ${title}\n\n${truncated}`
+}
+```
+
+### Per-page conversation isolation
+
+Each tab runs its own content script instance. The `tabId` is threaded through every message from `chat:send` → `agent:run` → `agent:response`, so the service worker can route replies back to the originating tab. Clearing context (`context:clear`) calls `AgentLoop.clearHistory()` only for the loop instance associated with that tab.
+
+### DOM tool execution
+
+The content script registers a `browser.runtime.onMessage` listener and handles `agent:tool_call` messages by calling `executeContentTool`:
+
+```typescript
+function handleToolCall(requestId: string, call: ToolCall): void {
+  const result = executeContentTool(call)
+  if (result) {
+    safeSend({ type: 'tool:result', requestId, result: result.result })
+  }
+}
+```
+
+DOM tools executed in the content script context:
+
+| Tool | Action |
+|---|---|
+| `read_page_content` | Returns `document.body.innerText` or text under a CSS selector |
+| `click_element` | `querySelector(selector).click()` |
+| `type_text` | Sets `.value` on an input and dispatches input/change events |
+| `scroll_page` | `window.scrollBy(0, pixels)` |
+
+### Disabled-sites list
+
+The content script persists a per-hostname disabled list in `chrome.storage.local` under the key `gemma_disabled_sites`. When disabled, the gem icon is greyed out and `chat:open` / `chat:send` are suppressed.
+
+---
+
+## Service worker
+
+**Entry point:** `entrypoints/background.ts`
+
+The service worker is the message router for the entire extension. It starts `setupMessageRouter()` and eagerly creates the offscreen document so the model begins loading as soon as the extension is installed or the browser starts.
+
+```typescript
+export default defineBackground(() => {
+  setupMessageRouter()
+
+  ensureOffscreenDocument().then(() => {
+    log.info('Offscreen document created — model auto-loading')
+  })
+})
+```
+
+### Message routing
+
+`setupMessageRouter` registers a single `chrome.runtime.onMessage` listener that dispatches on `message.type`:
+
+| Message type | Action |
+|---|---|
+| `chat:send` | Ensures offscreen exists, forwards `agent:run` to offscreen |
+| `chat:open` | Ensures offscreen exists, sends `model:load` to offscreen |
+| `settings:update` | Forwards to offscreen |
+| `chat:stop` | Forwards to offscreen |
+| `context:clear` | Forwards to offscreen |
+| `model:switch` | Persists selection to storage, forwards to offscreen |
+| `tool:result` | Forwards to offscreen (completing a pending tool promise) |
+| `tool:execute` | Executes screenshot/JS directly; forwards DOM tools to content script |
+| `agent:response` | Routes to the originating tab's content script |
+| `agent:chunk` | Routes to the originating tab's content script |
+| `model:status` | Routes to the active tab's content script |
+
+### Privileged tool execution
+
+Two tools require service worker permissions and are handled without leaving the background:
+
+```typescript
+case 'tool:execute': {
+  if (call.name === 'take_screenshot') {
+    const dataUrl = await chrome.tabs.captureVisibleTab({ format: 'png' })
+    sendToRuntime({ type: 'tool:result', requestId, result: { screenshot: dataUrl } })
+    return
+  }
+
+  if (call.name === 'run_javascript') {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: (code: string) => {
+        try { return { value: String(new Function(code)()) } }
+        catch (e) { return { error: String(e) } }
+      },
+      args: [call.arguments.code as string],
+    })
+    sendToRuntime({ type: 'tool:result', requestId, result: results[0]?.result })
+    return
+  }
+
+  // DOM tools go to the content script
+  sendToTab(tabId, { type: 'agent:tool_call', requestId, call })
+}
+```
+
+---
+
+## Offscreen document
+
+**Entry point:** `entrypoints/offscreen/` (rendered at `offscreen.html`)
+
+The offscreen document is a hidden page that Chrome keeps alive alongside the service worker. It hosts the Gemma 4 model and the `AgentLoop` instance.
+
+### Creation and persistence
+
+`ensureOffscreenDocument` in `background/offscreen-manager.ts` uses `chrome.runtime.getContexts` to check whether the offscreen document already exists before creating it. A module-level `creating` promise prevents duplicate creation if multiple messages arrive simultaneously.
+
+```typescript
+export async function ensureOffscreenDocument(): Promise<void> {
+  const existingContexts = await chrome.runtime.getContexts({
+    contextTypes: ['OFFSCREEN_DOCUMENT'],
+    documentUrls: [chrome.runtime.getURL('offscreen.html')],
+  })
+
+  if (existingContexts.length > 0) return
+
+  if (creating) {
+    await creating
+    return
+  }
+
+  creating = chrome.offscreen.createDocument({
+    url: 'offscreen.html',
+    reasons: [chrome.offscreen.Reason.WORKERS],
+    justification: 'Run Gemma 4 model inference via WebGPU',
+  })
+
+  await creating
+  creating = null
+}
+```
+
+The offscreen document is created eagerly when the service worker starts, so the model begins loading immediately — before the user opens the chat.
+
+### Model host
+
+`GemmaModelHost` implements the `ModelBackend` interface. It loads the model with `@huggingface/transformers`, runs inference on WebGPU using ONNX with q4f16 quantization, and streams tokens back through a `TextStreamer` callback. Thinking tokens and tool call tokens are routed to separate callbacks and never mixed into the visible response stream.
+
+### Agent loop host
+
+The offscreen document maintains one `AgentLoop` instance per tab ID. On `agent:run`:
+
+1. The model is loaded if not already ready.
+2. A tab-specific `AgentLoop` is retrieved or created.
+3. Settings (`enableThinking`, `maxIterations`) are applied via `loop.updateOptions()`.
+4. `loop.run(userMessage)` is awaited.
+5. The final response is sent back as `agent:response` with the originating `tabId`.
+
+Tool calls from the loop are dispatched as `tool:execute` messages to the service worker, which routes them to the content script or handles them directly.
+
+---
+
+## Full message flow
+
+<Steps>
+  <Step title="User opens chat">
+    Content script sends `chat:open`. Service worker calls `ensureOffscreenDocument()` and sends `model:load` to the offscreen document. Offscreen document loads the model and sends `model:status` updates back; service worker relays them to the active tab.
+  </Step>
+  <Step title="User sends a message">
+    Content script sends `chat:send` with the user text, current settings, and a page snapshot. Service worker forwards it as `agent:run` to the offscreen document, including the sender's `tabId`.
+  </Step>
+  <Step title="Agent loop generates a response">
+    The offscreen document calls `loop.run(userMessage)`. As tokens are streamed, `agent:chunk` messages are sent through the service worker to the originating tab's content script, which appends them to the chat overlay.
+  </Step>
+  <Step title="Model calls a tool">
+    The offscreen document sends `tool:execute` to the service worker with the tool name, arguments, a unique `requestId`, and the `tabId`. The service worker handles privileged tools or forwards `agent:tool_call` to the content script.
+  </Step>
+  <Step title="Tool result returns">
+    The content script (or service worker) sends `tool:result` with the matching `requestId`. The offscreen document's pending promise resolves, and the result is appended to the prompt for the next iteration.
+  </Step>
+  <Step title="Final response delivered">
+    When the model produces a response without tool calls, the offscreen document sends `agent:response`. The service worker routes it to the tab; the content script finalizes the streaming UI and re-enables the input.
+  </Step>
+</Steps>
+
+<Info>
+Because the offscreen document has no tab context, it always sends `tabId` on outbound messages. The service worker uses this to call `chrome.tabs.sendMessage(tabId, message)` to reach the correct content script.
+</Info>

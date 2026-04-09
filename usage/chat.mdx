@@ -1,0 +1,84 @@
+---
+title: "Using the chat"
+description: "How to interact with Gemma Gem's chat overlay on any webpage."
+---
+
+Gemma Gem injects a persistent chat interface into every page you visit. Because it runs entirely on-device via WebGPU, there is no network round-trip — responses are generated locally and streamed directly into the overlay.
+
+## Opening the chat
+
+<Steps>
+  <Step title="Navigate to any page">
+    Open any webpage in Chrome. Gemma Gem activates automatically on every site unless you have disabled it for that hostname.
+  </Step>
+  <Step title="Click the gem icon">
+    Look for the gem icon fixed to the **bottom-right corner** of the page. Click it to open the chat overlay. The icon has a circular progress ring around it while the model is loading.
+  </Step>
+  <Step title="Wait for the model to be ready">
+    The status indicator in the chat header shows the current state. On first use, the model files (~500 MB for E2B or ~1.5 GB for E4B) are downloaded and cached. Subsequent opens are immediate. The header reads **Ready** once inference is available.
+  </Step>
+  <Step title="Type your message and send">
+    Click the input area at the bottom of the chat, type your question or instruction, and press **Enter** (or **Shift+Enter** for a newline). Your message appears on the right; the model's response streams in on the left.
+  </Step>
+</Steps>
+
+## How the overlay is injected
+
+The chat panel is mounted inside a **Shadow DOM** element. This means:
+
+- Gemma Gem's styles are fully isolated — they never leak into or conflict with the page's own CSS.
+- The page's styles and scripts cannot accidentally affect the chat UI.
+- Keyboard events inside the input area are stopped from propagating to the page, so shortcuts on the host site do not fire while you type.
+
+<Note>
+The gem icon sits at `z-index: 2147483646` and the chat container at `z-index: 2147483647` — the highest possible values — so they appear above virtually all page content.
+</Note>
+
+## Streaming responses
+
+Once you send a message, the model starts generating tokens immediately. Text is streamed into the chat bubble word-by-word rather than appearing all at once. The `marked` library renders the output as Markdown in real time, so formatting such as **bold**, `inline code`, fenced code blocks, lists, and headings appears as the response arrives.
+
+<Note>
+Markdown rendering is applied progressively: completed lines are parsed and rendered as HTML, while the current unfinished line is displayed as plain text until a newline is received.
+</Note>
+
+## Thinking blocks
+
+When **Thinking mode** is enabled (the default), Gemma 4's native reasoning is active. The model's internal chain-of-thought is surfaced as a collapsible **Thinking...** block above the main response.
+
+- The block streams live as the model reasons.
+- It starts collapsed; hover over it to preview or click it to expand and pin it open.
+- The status bar at the top of the chat shows whether thinking is currently on or off.
+
+<Note>
+Thinking blocks are rendered with the same Markdown parser as regular responses. They appear in a distinct cyan color to distinguish them from the final answer.
+</Note>
+
+## Stopping a generation
+
+A red **stop** button replaces the send button as soon as the model starts generating. Click it at any time to interrupt the current response. A small indicator is added to the message list to confirm the generation was stopped.
+
+The send button returns as soon as the generation stops, and you can send a new message immediately.
+
+## Conversation history
+
+Context is maintained **per page tab**. Every message you send and every response the model gives is kept in memory for the lifetime of the tab. This means you can ask follow-up questions that refer to earlier turns without repeating context.
+
+<Note>
+Conversation history is held in the offscreen document's `AgentLoop` instance memory and is not written to disk. It is cleared automatically when the tab is closed, when you reload the page, or when you click **Clear context** in the status bar.
+</Note>
+
+To manually reset history without reloading, click **Clear context** in the status bar at the top of the chat. The conversation list is wiped and a confirmation message appears.
+
+## Model status indicator
+
+The chat header always shows the current model state:
+
+| Status | What it means |
+|--------|---------------|
+| `Initializing...` | The content script has connected but the model has not yet reported its status. |
+| `Loading model... X%` | The model is downloading or initializing. The progress ring on the gem icon fills in as the percentage rises. |
+| `Ready` | The model is loaded and waiting for input. |
+| `Error` | Something went wrong during model load. Check the offscreen document console for details. |
+
+The progress ring on the gem icon mirrors the loading percentage. It disappears once the model is ready.

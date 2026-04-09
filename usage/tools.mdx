@@ -1,0 +1,144 @@
+---
+title: "Browser tools"
+description: "The six browser automation tools Gemma Gem can use to interact with web pages."
+---
+
+Gemma Gem gives the model six tools it can invoke autonomously to read and manipulate the current page. The model decides when and how to use each tool based on your request. Tool calls are shown in the chat as small green monospace entries (dimmed by default, visible on hover).
+
+The tools are split across two extension contexts:
+
+| Context | Tools |
+|---------|-------|
+| **Content script** | `read_page_content`, `click_element`, `type_text`, `scroll_page` |
+| **Service worker** | `take_screenshot`, `run_javascript` |
+
+---
+
+## read_page_content
+
+Read the text or HTML content of the current page or a specific element. Useful for letting the model understand what is on the page before answering questions or taking action.
+
+**Runs in:** content script
+
+<ParamField path="body.selector" type="string">
+  CSS selector targeting a specific element. Defaults to `body`, which reads the entire page.
+</ParamField>
+
+<ParamField path="body.format" type="string" default="text">
+  Output format. Use `"text"` for plain readable content or `"html"` for raw HTML markup. Accepted values: `text`, `html`.
+</ParamField>
+
+<Note>
+Content is truncated at 64,000 characters to stay within context limits. A `...(truncated)` marker is appended when this limit is hit.
+</Note>
+
+**Example prompts**
+
+- "What does this page say?"
+- "Summarize the main article on this page."
+- "Read the HTML of the nav element."
+
+---
+
+## take_screenshot
+
+Capture the currently visible portion of the page as a PNG image. The screenshot is handled by the service worker using the Chrome `tabs.captureVisibleTab` API and passed back to the model as image data.
+
+**Runs in:** service worker
+
+This tool takes no parameters.
+
+**Example prompts**
+
+- "Take a screenshot so you can see what's on screen."
+- "Look at the page and tell me what you see."
+- "Check the current state of the form visually."
+
+---
+
+## click_element
+
+Click an element on the page identified by a CSS selector. Equivalent to a programmatic `.click()` on the matched DOM element.
+
+**Runs in:** content script
+
+<ParamField path="body.selector" type="string" required>
+  CSS selector for the element to click. Must match exactly one element.
+</ParamField>
+
+**Example prompts**
+
+- "Click the Submit button."
+- "Open the dropdown menu."
+- "Click the first search result."
+
+---
+
+## type_text
+
+Type text into an input, textarea, or other editable element identified by a CSS selector. Sets the element's value and fires `input` and `change` events so that JavaScript-driven forms (such as React-controlled inputs) pick up the change.
+
+**Runs in:** content script
+
+<ParamField path="body.selector" type="string" required>
+  CSS selector for the input element to type into.
+</ParamField>
+
+<ParamField path="body.text" type="string" required>
+  The text to enter into the element.
+</ParamField>
+
+**Example prompts**
+
+- "Type 'hello world' into the search box."
+- "Fill in the email field with test@example.com."
+- "Enter my query into the input at the top of the page."
+
+---
+
+## scroll_page
+
+Scroll the page up or down by a given number of pixels using a smooth scroll animation.
+
+**Runs in:** content script
+
+<ParamField path="body.direction" type="string" required>
+  Scroll direction. Accepted values: `up`, `down`.
+</ParamField>
+
+<ParamField path="body.amount" type="number" default="500">
+  Number of pixels to scroll. Defaults to `500`.
+</ParamField>
+
+**Example prompts**
+
+- "Scroll down to see more of the page."
+- "Scroll up to the top."
+- "Scroll down 1000 pixels."
+
+---
+
+## run_javascript
+
+Execute arbitrary JavaScript in the page context with full access to `document`, `window`, and all page globals. The last expression in the code string is evaluated and returned as the tool result.
+
+**Runs in:** service worker (injected into the page via `chrome.scripting.executeScript`)
+
+<ParamField path="body.code" type="string" required>
+  JavaScript code to execute. The last expression is returned as the result. Write code that reads from or mutates the DOM directly.
+</ParamField>
+
+<Warning>
+This tool runs with the same privileges as the page's own scripts. It can read cookies, mutate the DOM, make network requests, and access `localStorage`. Only use Gemma Gem on pages you trust.
+</Warning>
+
+**Example prompts**
+
+- "Get the value of the hidden input field with id 'token'."
+- "Count how many list items are in the table."
+- "Read the current URL and query parameters."
+
+```javascript
+// Example: collect all link hrefs on the page
+Array.from(document.querySelectorAll('a')).map(a => a.href)
+```

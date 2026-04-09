@@ -1,0 +1,94 @@
+---
+title: "Building"
+description: "Build Gemma Gem for development and production"
+---
+
+## Build commands
+
+<CodeGroup>
+
+```bash Development build
+pnpm build
+```
+
+```bash Production build
+pnpm build:prod
+```
+
+</CodeGroup>
+
+## All scripts
+
+| Script | Command | Description |
+|---|---|---|
+| `pnpm dev` | `wxt` | Start the development server with live reload |
+| `pnpm build` | `wxt build --mode development` | Development build with logging and source maps |
+| `pnpm build:prod` | `wxt build` | Production build, minified, errors-only logging |
+| `pnpm zip` | `wxt zip` | Package the extension as a zip for distribution |
+| `pnpm compile` | `tsc --noEmit` | TypeScript type check only — no output files emitted |
+
+## Development vs. production
+
+| Feature | Development (`pnpm build`) | Production (`pnpm build:prod`) |
+|---|---|---|
+| Logging | info, debug, warn, error active | Errors only |
+| Source maps | Yes | No |
+| Minification | No | Yes |
+| Extension name | Gemma Gem [dev] | Gemma Gem |
+| Output directory | `.output/chrome-mv3-dev/` | `.output/chrome-mv3/` |
+
+<Note>
+  Only `development` and `production` are valid build modes. The `wxt.config.ts` validates the `--mode` argument at startup and throws an error if any other value is passed.
+</Note>
+
+## Output directories
+
+After a build, the compiled extension is placed in:
+
+- **Development**: `.output/chrome-mv3-dev/`
+- **Production**: `.output/chrome-mv3/`
+
+Load either directory as an unpacked extension from `chrome://extensions`.
+
+## Development server
+
+```bash
+pnpm dev
+```
+
+This starts the WXT dev server. WXT watches for file changes and rebuilds incrementally, reloading the extension automatically. The output is written to `.output/chrome-mv3-dev/`.
+
+## Packaging for distribution
+
+```bash
+pnpm zip
+```
+
+Creates a zip archive of the built extension suitable for uploading to the Chrome Web Store or distributing manually. Run `pnpm build:prod` first if you want to package a production build — `pnpm zip` packages whatever is currently built.
+
+## Vite build configuration
+
+The project's Vite build config is defined in `wxt.config.ts`:
+
+```typescript
+vite: () => ({
+  build: {
+    target: 'esnext',
+    sourcemap: true,
+    minify: false,
+  },
+}),
+```
+
+<Note>
+  The `sourcemap: true` and `minify: false` settings in `wxt.config.ts` apply to the development build mode. Production builds (`pnpm build:prod`) use WXT's default production configuration, which enables minification and disables source maps.
+</Note>
+
+## ONNX runtime files
+
+As part of every build, `wxt.config.ts` copies the required ONNX runtime WASM files from the `onnxruntime-web` package into `public/ort/`:
+
+- `ort-wasm-simd-threaded.asyncify.mjs`
+- `ort-wasm-simd-threaded.asyncify.wasm`
+
+These files are bundled with the extension and loaded at runtime by the offscreen document to run Gemma 4 inference via WebGPU. The copy happens automatically — you do not need to run any extra step.

@@ -1,0 +1,57 @@
+{
+  "projectType": "frontend",
+  "projectName": "Gemma Gem",
+  "projectDescription": "A Chrome extension that runs Google's Gemma 4 AI model entirely on-device via WebGPU, enabling a private browser AI assistant with no API keys or cloud connectivity required.",
+  "theme": "almond",
+  "primaryColor": "#64d45c",
+  "lightColor": null,
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": ["introduction", "installation", "quickstart"]
+          },
+          {
+            "group": "Using Gemma Gem",
+            "pages": ["usage/chat", "usage/settings", "usage/tools"]
+          },
+          {
+            "group": "Architecture",
+            "pages": ["architecture/overview", "architecture/agent-loop", "architecture/extension-components"]
+          },
+          {
+            "group": "Development",
+            "pages": ["development/setup", "development/building", "development/debugging"]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Runs Gemma 4 entirely on-device via WebGPU — no API keys or cloud required",
+    "Agentic tool loop: read page content, take screenshots, click elements, type text, scroll, run JavaScript",
+    "Shadow DOM chat overlay injected on every page",
+    "Native thinking/reasoning mode with streaming responses",
+    "Model selection between Gemma 4 E2B (~500MB) and E4B (~1.5GB)",
+    "Per-site disable toggle with persistent settings via chrome.storage.local",
+    "Portable agent loop with zero Chrome dependencies (extractable as standalone library)"
+  ],
+  "publicApiSurface": [
+    "AgentLoop class (agent/agent-loop.ts)",
+    "ModelBackend interface (agent/types.ts)",
+    "ToolExecutor interface (agent/types.ts)",
+    "ToolDefinition interface (agent/types.ts)",
+    "buildPrompt() (agent/prompt-builder.ts)",
+    "appendToolCallAndResponse() (agent/prompt-builder.ts)",
+    "parseToolCalls() (agent/tool-parser.ts)",
+    "hasToolCalls() (agent/tool-parser.ts)",
+    "extractThinking() (agent/tool-parser.ts)",
+    "extractFinalResponse() (agent/tool-parser.ts)",
+    "TOOL_DEFINITIONS: read_page_content, take_screenshot, click_element, type_text, scroll_page, run_javascript",
+    "MODELS: gemma-4-e2b, gemma-4-e4b (shared/models.ts)"
+  ]
+}

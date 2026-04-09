@@ -1,0 +1,279 @@
+---
+title: "Agent loop"
+description: "How Gemma Gem's agentic reasoning and tool-calling loop works"
+---
+
+The `AgentLoop` class (in `agent/agent-loop.ts`) drives the model's reasoning cycle: it builds prompts, generates output, parses tool calls, executes them, and loops until the model produces a plain text response or the iteration cap is reached.
+
+<Note>
+The entire `agent/` directory has zero Chrome dependencies. It defines interfaces (`ModelBackend`, `ToolExecutor`) and can be extracted as a standalone library. All Chrome-specific code lives in `background/`, `offscreen/`, and `entrypoints/`.
+</Note>
+
+## Core interfaces
+
+### `AgentLoopOptions`
+
+Passed to the `AgentLoop` constructor. All fields except `maxIterations` and `enableThinking` are required.
+
+<ParamField body="model" type="ModelBackend" required>
+  The inference backend. Must implement `generate()`, `countTokens()`, `contextLimit`, and `isLoaded()`.
+</ParamField>
+
+<ParamField body="tools" type="ToolDefinition[]" required>
+  Tool definitions the model can call. Each definition is serialized into the system prompt using Gemma's native tool declaration syntax.
+</ParamField>
+
+<ParamField body="executor" type="ToolExecutor" required>
+  Executes tool calls returned by the model. In the extension, this dispatches calls to the service worker which routes them to the content script or handles them directly.
+</ParamField>
+
+<ParamField body="systemPrompt" type="string" required>
+  The system instruction prepended to every conversation. Tool declarations are appended to this.
+</ParamField>
+
+<ParamField body="maxIterations" type="number" default="10">
+  Maximum number of generate → parse → execute cycles before the loop terminates with a partial-result message.
+</ParamField>
+
+<ParamField body="enableThinking" type="boolean" default="true">
+  Activates Gemma 4's native thinking mode. When enabled, a `<|think|>` token is injected into the system turn and the model emits thinking blocks wrapped in `<|channel>thought…<channel|>`. Defaults to `true` in the extension UI.
+</ParamField>
+
+<ParamField body="onThinking" type="(text: string) => void">
+  Called once with the complete extracted thinking text after each generation.
+</ParamField>
+
+<ParamField body="onThinkingChunk" type="(text: string) => void">
+  Called incrementally as thinking tokens stream from the model.
+</ParamField>
+
+<ParamField body="onToolCall" type="(call: ToolCall) => void">
+  Called just before each tool is executed.
+</ParamField>
+
+<ParamField body="onToolResponse" type="(resp: ToolResponse) => void">
+  Called after each tool result is received.
+</ParamField>
+
+<ParamField body="onChunk" type="(text: string) => void">
+  Called incrementally with cleaned response text tokens (thinking and tool blocks stripped).
+</ParamField>
+
+```typescript
+export interface AgentLoopOptions {
+  model: ModelBackend
+  tools: ToolDefinition[]
+  executor: ToolExecutor
+  systemPrompt: string
+  maxIterations?: number
+  enableThinking?: boolean
+  onThinking?: (text: string) => void
+  onThinkingChunk?: (text: string) => void
+  onToolCall?: (call: ToolCall) => void
+  onToolResponse?: (resp: ToolResponse) => void
+  onChunk?: (text: string) => void
+}
+```
+
+### `AgentRunResult`
+
+The value returned by `AgentLoop.run()`.
+
+<ParamField body="response" type="string">
+  The model's final plain-text response, with all special tokens, thinking blocks, and tool call markers stripped.
+</ParamField>
+
+<ParamField body="toolCallCount" type="number">
+  Total number of individual tool calls executed during this run (summed across all iterations).
+</ParamField>
+
+<ParamField body="iterations" type="number">
+  Number of generate cycles that completed.
+</ParamField>
+
+```typescript
+export interface AgentRunResult {
+  response: string
+  toolCallCount: number
+  iterations: number
+}
+```
+
+### `ModelBackend`
+
+The interface `GemmaModelHost` implements. Keeping this interface in `agent/` lets the loop be tested with a mock backend.
+
+```typescript
+export interface ModelBackend {
+  generate(prompt: string, options?: GenerateOptions): Promise<string>
+  countTokens(text: string): number
+  contextLimit: number
+  isLoaded(): boolean
+}
+```
+
+<ParamField body="generate" type="(prompt: string, options?: GenerateOptions) => Promise<string>">
+  Runs inference and returns the raw model output string (special tokens included). Accepts an optional `onChunk` callback for streaming and an `imageDataUrl` for multimodal turns.
+</ParamField>
+
+<ParamField body="countTokens" type="(text: string) => number">
+  Returns the token count for a string using the model's tokenizer. Used to calculate remaining context budget when a tool call is truncated.
+</ParamField>
+
+<ParamField body="contextLimit" type="number">
+  Maximum context length in tokens. Both Gemma 4 models set this to `128_000`.
+</ParamField>
+
+<ParamField body="isLoaded" type="() => boolean">
+  Returns `true` when the model and processor are initialized and ready to generate.
+</ParamField>
+
+### `ToolExecutor`
+
+```typescript
+export interface ToolExecutor {
+  execute(call: ToolCall): Promise<ToolResponse>
+}
+```
+
+Each call executes one tool and returns its result. In the extension the executor sends a `tool:execute` message to the service worker and waits for a matching `tool:result` reply.
+
+## The loop in detail
+
+```
+buildPrompt(systemPrompt, tools, history, enableThinking)
+    │
+    ▼
+model.generate(prompt, { maxTokens: 1024, onChunk, onThinkingChunk })
+    │
+    ├─ Truncated tool call? ──► recovery (see below)
+    │
+    ▼
+extractThinking(output)   ← strips thinking block for tool parsing
+    │
+    ├─ hasToolCalls(rest)?
+    │       │ No  ──► extractFinalResponse(output) → return AgentRunResult
+    │       │
+    │       ▼ Yes
+    │  parseToolCalls(rest) → ToolCall[]
+    │       │
+    │       ▼
+    │  executor.execute(call) for each call → ToolResponse[]
+    │       │
+    │       ▼
+    │  appendToolCallAndResponse(prompt, calls, responses) → next prompt
+    │       │
+    └───────┘  (loop, up to maxIterations)
+```
+
+Constants used inside the loop:
+
+| Constant | Value | Role |
+|---|---|---|
+| `DEFAULT_MAX_ITERATIONS` | `10` | Default iteration cap |
+| `DEFAULT_MAX_TOKENS` | `1024` | Token budget per generation call |
+| `MIN_OUTPUT_BUDGET` | `256` | Minimum tokens required to attempt continuation |
+
+## Thinking mode
+
+When `enableThinking` is `true`, the system turn includes a `<|think|>` token. The model wraps its reasoning in `<|channel>thought\n…<channel|>` blocks before emitting a tool call or response.
+
+`extractThinking` in `tool-parser.ts` splits raw output into a thinking string and the remainder:
+
+```typescript
+export function extractThinking(text: string): { thinking: string, rest: string } {
+  const thinkMatch = text.match(/<\|channel>thought\n([\s\S]*?)<channel\|>/)
+  if (!thinkMatch) return { thinking: '', rest: text }
+  return {
+    thinking: thinkMatch[1].trim(),
+    rest: text.replace(thinkMatch[0], '').trim(),
+  }
+}
+```
+
+The `rest` value (thinking stripped) is what `hasToolCalls` and `parseToolCalls` operate on. Thinking content is passed to the `onThinking` / `onThinkingChunk` callbacks and never appended to the tool prompt.
+
+## Truncated tool call recovery
+
+When the model emits an opening `<|tool_call>` token but not the closing `<tool_call|>` — meaning the generation hit `maxTokens` mid-call — the loop attempts recovery:
+
+<AccordionGroup>
+  <Accordion title="Case 1: context nearly full — strip thinking and retry">
+    When `model.contextLimit - model.countTokens(fullPrompt) ≤ MIN_OUTPUT_BUDGET`, the loop strips all thinking blocks from the partial output using a regex, re-tokenizes, and retries generation with the freed budget.
+
+    ```typescript
+    const stripped = output.replace(/<\|channel>thought[\s\S]*?<channel\|>\s*/g, '')
+    const strippedPrompt = prompt + stripped
+    const strippedRemaining = model.contextLimit - model.countTokens(strippedPrompt)
+
+    if (strippedRemaining > MIN_OUTPUT_BUDGET) {
+      const continuation = await model.generate(strippedPrompt, { maxTokens: strippedRemaining, ... })
+      output = stripped + continuation
+    }
+    ```
+  </Accordion>
+  <Accordion title="Case 2: room left — continue with remaining budget">
+    When there is still token budget available, the loop appends the partial output to the prompt and calls `model.generate` again with the remaining token count as `maxTokens`.
+
+    ```typescript
+    const fullPrompt = prompt + output
+    const remaining = model.contextLimit - model.countTokens(fullPrompt)
+
+    if (remaining > MIN_OUTPUT_BUDGET) {
+      const continuation = await model.generate(fullPrompt, { maxTokens: remaining, ... })
+      output += continuation
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Instance methods
+
+```typescript
+class AgentLoop {
+  constructor(options: AgentLoopOptions)
+
+  // Run the agent loop for one user message
+  async run(userMessage: string): Promise<AgentRunResult>
+
+  // Stop an in-progress generation
+  abort(): void
+
+  // Update thinking mode or iteration cap without recreating the instance
+  updateOptions(partial: Partial<Pick<AgentLoopOptions, 'enableThinking' | 'maxIterations'>>): void
+
+  // Wipe conversation history (used by "Clear context" in settings)
+  clearHistory(): void
+
+  // Return a snapshot of the current conversation history
+  getHistory(): ConversationMessage[]
+}
+```
+
+<Note>
+`clearHistory()` resets only the in-memory history array. It does not affect the offscreen document's model weights or KV cache — the next `run()` call starts a fresh conversation from the system prompt.
+</Note>
+
+## Instantiation example
+
+```typescript
+import { AgentLoop } from '@/agent'
+import type { ModelBackend, ToolExecutor } from '@/agent'
+
+const loop = new AgentLoop({
+  model: gemmaModelHost,       // implements ModelBackend
+  tools: TOOL_DEFINITIONS,
+  executor: toolExecutor,      // implements ToolExecutor
+  systemPrompt: SYSTEM_PROMPT,
+  maxIterations: 10,
+  enableThinking: true,        // default in the extension; set false to skip reasoning
+  onChunk: (text) => sendChunkToTab(tabId, text),
+  onThinkingChunk: (text) => sendThinkingChunk(tabId, text),
+  onToolCall: (call) => log.info('tool call:', call.name),
+})
+
+const result = await loop.run('Summarize this page')
+// result.response — final assistant text
+// result.toolCallCount — how many tools were called
+// result.iterations — how many generate cycles ran
+```

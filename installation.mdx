@@ -1,0 +1,78 @@
+---
+title: "Installation"
+description: "How to install and load the Gemma Gem Chrome extension from source."
+---
+
+## Prerequisites
+
+<Info>
+  Gemma Gem runs the model entirely on-device using WebGPU. You need a Chrome version with WebGPU enabled and a GPU that supports it.
+</Info>
+
+- **Chrome** with WebGPU support (Chrome 113+ on most platforms)
+- **Node.js** 18 or later
+- **pnpm** (the project's required package manager)
+
+<Warning>
+  Gemma Gem is not yet available on the Chrome Web Store. You must build and load it manually in developer mode.
+</Warning>
+
+## Build and load the extension
+
+<Steps>
+  <Step title="Clone the repository">
+    Clone the Gemma Gem repository to your local machine:
+
+    ```bash
+    git clone https://github.com/kessler/gemma-gem.git
+    cd gemma-gem
+    ```
+  </Step>
+
+  <Step title="Install dependencies">
+    Use `pnpm` to install all project dependencies:
+
+    ```bash
+    pnpm install
+    ```
+  </Step>
+
+  <Step title="Build the extension">
+    Run the development build:
+
+    ```bash
+    pnpm build
+    ```
+
+    This produces a built extension in the `.output/chrome-mv3-dev/` directory.
+
+    <Note>
+      For a production build with logging silenced and minified output, run `pnpm build:prod` instead.
+    </Note>
+  </Step>
+
+  <Step title="Open Chrome Extensions">
+    In Chrome, navigate to `chrome://extensions` and enable **Developer mode** using the toggle in the top-right corner.
+  </Step>
+
+  <Step title="Load the unpacked extension">
+    Click **Load unpacked** and select the `.output/chrome-mv3-dev/` directory from the repository root.
+
+    The Gemma Gem extension will appear in your extensions list with a gem icon.
+  </Step>
+</Steps>
+
+## Model download
+
+On first use, Gemma Gem downloads the selected model from Hugging Face and caches it in your browser. This happens automatically when you open the chat for the first time.
+
+| Model | Download size | Notes |
+|-------|--------------|-------|
+| Gemma 4 E2B | ~500 MB | Default model, faster to download |
+| Gemma 4 E4B | ~1.5 GB | Larger, more capable model |
+
+<Warning>
+  Make sure you have sufficient free disk space before first use: at least **500 MB** for the E2B model, or **1.5 GB** for E4B. Models are cached after the first download and do not need to be re-downloaded on subsequent uses.
+</Warning>
+
+Download progress is displayed both on the gem icon overlay (as a progress ring) and inside the chat window. The extension is ready to use once the progress indicator disappears.
